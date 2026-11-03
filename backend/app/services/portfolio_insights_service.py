@@ -64,7 +64,6 @@ class PortfolioInsightsService:
         "cmdb_missing_mandatory_data": "fix_cmdb_mandatory_field",
         "duplicate_application_code": "review_duplicate_application_code",
         "possible_duplicate_application": "review_possible_duplicate",
-        "obsolete_technology_indicator": "confirm_obsolete_technology",
         "explicit_integration_with_unknown_target": "investigate_unknown_integration_target",
         "output_family_unmapped_application": "update_output_family_config",
         "output_family_config_member_not_found": "update_output_family_config",
@@ -694,31 +693,6 @@ class PortfolioInsightsService:
 
         technology = sources.get("technology")
         if technology:
-            for indicator in technology.get("obsolete_indicators", []):
-                code = self._text(indicator.get("application_code"))
-                app = by_code.get(code, [None])[0] if code else None
-                severity = (
-                    "critical"
-                    if app and self._is_critical(app.get("business_criticality"))
-                    else "high"
-                )
-                evidence = (
-                    f"{indicator.get('field')}: {indicator.get('value')}; "
-                    f"{indicator.get('reason')}"
-                )
-                risks.append(
-                    self._risk(
-                        "obsolete_technology_indicator",
-                        severity,
-                        app,
-                        code,
-                        indicator.get("application_name"),
-                        "technology",
-                        evidence,
-                        "Confirm the technology lifecycle and support status for the recorded indicator.",
-                        "medium",
-                    )
-                )
             for integration in technology.get("integrations", []):
                 if integration.get("target_application_code") or integration.get(
                     "target_application_name"

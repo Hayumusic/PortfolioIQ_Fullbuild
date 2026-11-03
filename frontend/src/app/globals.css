@@ -264,6 +264,15 @@ h1, h2, h3 { letter-spacing: -0.025em; }
 .portfolio-insights-table { border: 1px solid var(--line); border-radius: 9px; }
 .portfolio-insights-table table { min-width: 1050px; }
 .portfolio-insights-table td { max-width: 420px; overflow-wrap: anywhere; vertical-align: top; }
+.insights-collapsible { padding: 0; }
+.insights-collapsible-toggle { align-items: center; background: transparent; border: 0; color: inherit; cursor: pointer; display: flex; font: inherit; justify-content: space-between; padding: 18px 20px; text-align: left; width: 100%; }
+.insights-collapsible-toggle strong { display: block; font-size: 20px; }
+.insights-collapsible-toggle small { color: var(--muted); display: block; font-size: 13px; margin-top: 5px; }
+.insights-collapsible-icon { color: var(--muted); font-size: 22px; font-weight: 500; line-height: 1; }
+.insights-collapsible-content { padding: 0 20px 20px; }
+.insights-collapsible-content > .section-heading { align-items: center; margin-bottom: 12px; }
+.scorecard-sort-button { background: transparent; border: 0; color: inherit; cursor: pointer; font: inherit; font-weight: inherit; padding: 0; text-align: left; }
+.scorecard-sort-button:hover { color: var(--accent); }
 .result-stack { display: flex; flex-direction: column; gap: 18px; }
 .result-details { border-top: 1px solid var(--line); padding-top: 16px; }
 .result-details summary { color: var(--accent); cursor: pointer; font-size: 12px; font-weight: 750; }

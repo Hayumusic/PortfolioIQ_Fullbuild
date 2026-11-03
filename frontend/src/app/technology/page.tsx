@@ -2,10 +2,10 @@
 
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { useJob } from "@/context/job-context";
-import { ApiError, getIntegrationNeighborhood, getTechnologyClusters, getTechnologyIntegrations, getTechnologyOptions, getUploadStatus, runTechnologyAnalysis } from "@/lib/api";
-import type { IntegrationNeighborhoodResponse, TechnologyClustersResponse, TechnologyIntegration, TechnologyIntegrationsResponse, TechnologyOptionsResponse } from "@/types/api";
+import { ApiError, getIntegrationNeighborhood, getObsoleteTechnology, getTechnologyClusters, getTechnologyIntegrations, getTechnologyOptions, getUploadStatus, runTechnologyAnalysis } from "@/lib/api";
+import type { IntegrationNeighborhoodResponse, ObsoleteTechnologyResponse, TechnologyClustersResponse, TechnologyIntegration, TechnologyIntegrationsResponse, TechnologyOptionsResponse } from "@/types/api";
 
-const tabs = ["Integration Map", "Technology Stack Analysis & Visualization"];
+const tabs = ["Integration Map", "Technology Stack Analysis & Visualization", "Technology Risk Register"];
 
 export default function TechnologyPage() {
   const { jobId, hydrated } = useJob();
@@ -26,6 +26,7 @@ export default function TechnologyPage() {
   const [integrationSearchClick, setIntegrationSearchClick] = useState(0);
   const [clusterPortfolio, setClusterPortfolio] = useState("");
   const [clusters, setClusters] = useState<TechnologyClustersResponse | null>(null);
+  const [technologyRisks, setTechnologyRisks] = useState<ObsoleteTechnologyResponse | null>(null);
 
   const loadOptions = useCallback(async (currentJob: string) => {
     setOptions(await getTechnologyOptions(currentJob));
@@ -77,6 +78,7 @@ export default function TechnologyPage() {
       await loadOptions(jobId);
       setNeighborhood(null);
       setClusters(null);
+      setTechnologyRisks(await getObsoleteTechnology(jobId, { portfolio: "", indicator: "", businessCriticality: "", search: "", page: 1, pageSize: "all" }));
       setMessage("Technology and integration analysis completed for the current CMDB.");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Technology analysis failed.");
@@ -110,6 +112,13 @@ export default function TechnologyPage() {
     void getTechnologyClusters(jobId, clusterPortfolio).then(setClusters).catch((caught) => setError(caught instanceof Error ? caught.message : "Could not load technology stack analysis."));
   }, [analyzed, clusterPortfolio, jobId]);
 
+  useEffect(() => {
+    if (!jobId || !analyzed) { setTechnologyRisks(null); return; }
+    void getObsoleteTechnology(jobId, { portfolio: "", indicator: "", businessCriticality: "", search: "", page: 1, pageSize: "all" })
+      .then(setTechnologyRisks)
+      .catch((caught) => setError(caught instanceof Error ? caught.message : "Could not load the technology risk register."));
+  }, [analyzed, jobId]);
+
   const availableApplications = useMemo(() => deduplicateApplications(options?.applications ?? []), [options]);
 
   return <div className="page-stack technology-page">
@@ -123,10 +132,28 @@ export default function TechnologyPage() {
     <section className="similarity-tabs" aria-label="Technology views">
       <div className="similarity-tab-list" role="tablist" aria-label="Technology views">{tabs.map((tab, index) => <button key={tab} id={`${tabId}-tab-${index}`} className="similarity-tab" type="button" role="tab" aria-selected={activeTab === index} aria-controls={`${tabId}-panel-${index}`} tabIndex={activeTab === index ? 0 : -1} onClick={() => setActiveTab(index)}>{tab}</button>)}</div>
       <div className="similarity-tab-panel panel" id={`${tabId}-panel-${activeTab}`} role="tabpanel" aria-labelledby={`${tabId}-tab-${activeTab}`}>
-        {!analyzed ? <p className="message message-info">Preparing this module’s results…</p> : activeTab === 0 ? <IntegrationView options={options!} applications={availableApplications} allIntegrations={allIntegrations} result={neighborhood} applicationCode={applicationCode} setApplicationCode={setApplicationCode} portfolio={integrationPortfolio} setPortfolio={setIntegrationPortfolio} integrationType={integrationType} setIntegrationType={setIntegrationType} onSearch={() => setIntegrationSearchClick((value) => value + 1)} /> : <TechnologyStackView options={options!} result={clusters} portfolio={clusterPortfolio} setPortfolio={setClusterPortfolio} />}
+        {!analyzed ? <p className="message message-info">Preparing this module’s results…</p> : activeTab === 0 ? <IntegrationView options={options!} applications={availableApplications} allIntegrations={allIntegrations} result={neighborhood} applicationCode={applicationCode} setApplicationCode={setApplicationCode} portfolio={integrationPortfolio} setPortfolio={setIntegrationPortfolio} integrationType={integrationType} setIntegrationType={setIntegrationType} onSearch={() => setIntegrationSearchClick((value) => value + 1)} /> : activeTab === 1 ? <TechnologyStackView options={options!} result={clusters} portfolio={clusterPortfolio} setPortfolio={setClusterPortfolio} /> : <TechnologyRiskRegister result={technologyRisks} />}
       </div>
     </section>
   </div>;
+}
+
+function TechnologyRiskRegister({ result }: { result: ObsoleteTechnologyResponse | null }) {
+  if (!result) return <p className="message message-info">Loading technology risk evidence…</p>;
+  const rows = result.indicators.map((indicator) => [
+    `${indicator.application_name} (${indicator.application_code || "Application Code unavailable"})`,
+    indicator.portfolio || "Unassigned",
+    indicator.severity,
+    indicator.indicator || "Technology lifecycle concern",
+    `${indicator.field}: ${indicator.value}`,
+    indicator.reason,
+  ]);
+  return <section>
+    <Heading title="Technology Risk Register" text="Technology concerns identified from available technology age, stack, functionality, framework, version, and lifecycle evidence in the current CMDB." />
+    <p className="technology-scope-summary">{result.obsolete_indicator_count.toLocaleString()} technology concerns with available evidence.</p>
+    {result.warnings.map((warning) => <p key={warning} className="message message-info">{warning}</p>)}
+    {rows.length ? <Table headers={["Application", "Portfolio", "Severity", "Technology Concern", "Evidence", "Reason"]} rows={rows} /> : <p className="message message-info">No technology risks were identified by the available lifecycle and technology evidence.</p>}
+  </section>;
 }
 
 function IntegrationView({ options, applications, allIntegrations, result, applicationCode, setApplicationCode, portfolio, setPortfolio, integrationType, setIntegrationType, onSearch }: { options: TechnologyOptionsResponse; applications: TechnologyOptionsResponse["applications"]; allIntegrations: TechnologyIntegrationsResponse | null; result: IntegrationNeighborhoodResponse | null; applicationCode: string; setApplicationCode: (value: string) => void; portfolio: string; setPortfolio: (value: string) => void; integrationType: string; setIntegrationType: (value: string) => void; onSearch: () => void }) {

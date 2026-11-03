@@ -26,7 +26,7 @@ class TechnologyAnalysisService:
     """Prepare complete, deterministic technology and explicit-integration views."""
 
     result_file_name = "technology.json"
-    analysis_version = 4
+    analysis_version = 5
     page_sizes = (25, 50, 100, 200)
     graph_edge_limit = 30
     no_integrations_warning = (
@@ -87,7 +87,22 @@ class TechnologyAnalysisService:
         "go_live_date": ("Go Live Date", "Go-Live Date", "Go Live", "Production Date"),
         "last_updated_date": ("Last Updated Date", "Application Updated Date", "Last Upgrade Date"),
         "technology_age": ("Technology Age", "Technology Age (Years)", "Technology Age in Years"),
-        "technology_version": ("Technology Version", "Framework Version", "Platform Version"),
+        "technology_version": (
+            "Technology Version",
+            "Framework Version",
+            "Platform Version",
+            "Framework",
+            "Frameworks",
+            "Application Framework",
+            "Software Framework",
+            "Frameworks Used",
+        ),
+        "functionality": (
+            "Business Functionality",
+            "Application Functionality",
+            "Functionality",
+            "Functional Description",
+        ),
         "technology_updated_date": ("Technology Updated Date", "Technology Upgrade Date", "Technology Last Updated"),
         "api_webservices": (
             "API or Webservices",
@@ -1450,7 +1465,7 @@ class TechnologyAnalysisService:
                 )
                 if technology_age_indicator:
                     indicators.append(technology_age_indicator)
-            for field in (*cls.technology_fields, "technology_version"):
+            for field in (*cls.technology_fields, "technology_version", "functionality"):
                 value = application["values"].get(field, "").strip()
                 if cls._is_placeholder(value):
                     continue

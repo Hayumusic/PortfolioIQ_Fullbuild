@@ -6,7 +6,7 @@ import { MetricCard } from "@/components/metric-card";
 import { StatusBadge } from "@/components/status-badge";
 import { useJob } from "@/context/job-context";
 import { ApiError, csvDownloadUrl, getUploadStatus, runPortfolioInsights } from "@/lib/api";
-import type { PortfolioInsightsResponse } from "@/types/api";
+import type { PortfolioInsightsResponse, PortfolioScorecard } from "@/types/api";
 
 export default function PortfolioInsightsPage() {
   const { jobId, hydrated } = useJob();
@@ -81,27 +81,62 @@ export default function PortfolioInsightsPage() {
 
       {result.warnings.length > 0 && <section className="panel section-panel" aria-labelledby="insights-warnings-title"><h3 id="insights-warnings-title">Warnings</h3><ul className="portfolio-insights-warnings">{result.warnings.map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}</ul></section>}
 
-      <section className="panel section-panel" aria-labelledby="module-status-title">
-        <div className="section-heading"><div><h3 id="module-status-title">Analysis module status</h3><p>Portfolio findings use only modules with current-job results.</p></div></div>
+      <CollapsiblePanel title="Analysis module status" description="Portfolio findings use only modules with current-job results.">
         <DataTable headers={["Module", "Status", "Analysis status", "Key metrics", "Warnings"]} rows={result.module_status.map((module) => ({ id: module.module_name, cells: [moduleLabel(module.module_name), <StatusBadge key="status" tone={module.status === "available" ? "success" : module.status === "error" ? "danger" : "warning"}>{module.status}</StatusBadge>, module.analysis_status || "Not run", Object.entries(module.key_metrics).filter(([, value]) => value !== null && value !== undefined).map(([key, value]) => `${humanize(key)}: ${value}`).join(" · ") || "No metrics available", module.warnings.join("; ") || "—"] }))} empty="No module status is available." />
-      </section>
+      </CollapsiblePanel>
 
-      <section className="panel section-panel" aria-labelledby="portfolio-scorecard-title">
-        <div className="section-heading"><div><h3 id="portfolio-scorecard-title">Portfolio scorecards</h3><p>Compare application volume, completeness, risks, and cross-module findings.</p></div><a className="button button-secondary" href={csvDownloadUrl(result.detail_endpoints.portfolio_scorecard_csv_endpoint)}>Download CSV</a></div>
-        <DataTable headers={["Portfolio", "Applications", "Completeness", "Critical apps", "Possible duplicates", "Obsolete tech indicators", "Integrations", "Unmapped outputs", "Risks", "Highest risk"]} rows={result.top_portfolio_scorecards.map((portfolio) => ({ id: portfolio.portfolio, cells: [portfolio.portfolio, portfolio.application_count.toLocaleString(), percent(portfolio.completeness_percent), portfolio.critical_application_count.toLocaleString(), count(portfolio.possible_duplicate_count), count(portfolio.obsolete_indicator_count), count(portfolio.explicit_integration_count), count(portfolio.unmapped_output_family_application_count), portfolio.risk_count.toLocaleString(), portfolio.highest_risk_severity || "—"] }))} empty="No portfolio scorecards are available." />
-      </section>
+      <CollapsiblePanel title="Portfolio scorecards" description="Compare application volume, completeness, risks, and cross-module findings.">
+        <div className="section-heading"><span /><a className="button button-secondary" href={csvDownloadUrl(result.detail_endpoints.portfolio_scorecard_csv_endpoint)}>Download CSV</a></div>
+        <ScorecardTable portfolios={result.top_portfolio_scorecards} />
+      </CollapsiblePanel>
 
-      <section className="panel section-panel" aria-labelledby="risk-register-title">
-        <div className="section-heading"><div><h3 id="risk-register-title">Risk register</h3><p>Showing the highest-priority risks returned for this analysis.</p></div><a className="button button-secondary" href={csvDownloadUrl(result.detail_endpoints.risks_csv_endpoint)}>Download CSV</a></div>
-        <DataTable headers={["Severity", "Application", "Portfolio", "Risk", "Evidence", "Recommended action", "Source", "Confidence"]} rows={result.risk_sample.map((risk) => ({ id: risk.risk_id, cells: [<StatusBadge key="severity" tone={severityTone(risk.severity)}>{risk.severity}</StatusBadge>, applicationLabel(risk.application_name, risk.application_code), risk.portfolio || "Unassigned", humanize(risk.risk_type), risk.evidence, risk.recommended_action, moduleLabel(risk.evidence_module), risk.confidence] }))} empty="No risks were identified from available module results." />
-      </section>
+      <CollapsiblePanel title="Risk register" description="Showing the highest-priority non-technology risks returned for this analysis.">
+        <div className="section-heading"><span /><a className="button button-secondary" href={csvDownloadUrl(result.detail_endpoints.risks_csv_endpoint)}>Download CSV</a></div>
+        <DataTable headers={["Severity", "Application", "Portfolio", "Risk", "Evidence", "Recommended action", "Source", "Confidence"]} rows={result.risk_sample.map((risk) => ({ id: risk.risk_id, cells: [<StatusBadge key="severity" tone={severityTone(risk.severity)}>{risk.severity}</StatusBadge>, applicationLabel(risk.application_name, risk.application_code), risk.portfolio || "Unassigned", humanize(risk.risk_type), risk.evidence, risk.recommended_action, moduleLabel(risk.evidence_module), risk.confidence] }))} empty="No non-technology risks were identified from available module results." />
+      </CollapsiblePanel>
 
-      <section className="panel section-panel" aria-labelledby="action-items-title">
-        <div className="section-heading"><div><h3 id="action-items-title">Recommended actions</h3><p>Actions are linked to their source risks and available evidence.</p></div><a className="button button-secondary" href={csvDownloadUrl(result.detail_endpoints.action_items_csv_endpoint)}>Download CSV</a></div>
+      <CollapsiblePanel title="Recommended actions" description="Actions are linked to their source risks and available evidence.">
+        <div className="section-heading"><span /><a className="button button-secondary" href={csvDownloadUrl(result.detail_endpoints.action_items_csv_endpoint)}>Download CSV</a></div>
         <DataTable headers={["Priority", "Application", "Portfolio", "Action", "Owner hint", "Evidence module"]} rows={result.action_item_sample.map((action) => ({ id: action.action_id, cells: [<StatusBadge key="priority" tone={severityTone(action.priority)}>{action.priority}</StatusBadge>, applicationLabel(action.application_name, action.application_code), action.portfolio || "Unassigned", action.description, action.owner_hint || "Not specified", moduleLabel(action.evidence_module)] }))} empty="No action items are available." />
-      </section>
+      </CollapsiblePanel>
     </>}
   </div>;
+}
+
+function CollapsiblePanel({ title, description, children }: { title: string; description: string; children: ReactNode }) {
+  const [expanded, setExpanded] = useState(true);
+  const contentId = `insights-${title.toLowerCase().replaceAll(" ", "-")}`;
+  return <section className="panel section-panel insights-collapsible">
+    <button className="insights-collapsible-toggle" type="button" aria-expanded={expanded} aria-controls={expanded ? contentId : undefined} onClick={() => setExpanded((value) => !value)}>
+      <span><strong>{title}</strong><small>{description}</small></span><span className="insights-collapsible-icon" aria-hidden="true">{expanded ? "−" : "+"}</span>
+    </button>
+    {expanded && <div className="insights-collapsible-content" id={contentId}>{children}</div>}
+  </section>;
+}
+
+function ScorecardTable({ portfolios }: { portfolios: PortfolioScorecard[] }) {
+  const columns = ["Portfolio", "Applications", "Completeness", "Critical apps", "Possible duplicates", "Obsolete tech indicators", "Integrations", "Unmapped outputs", "Risks", "Highest risk"];
+  const [sort, setSort] = useState<{ index: number; direction: "ascending" | "descending" }>({ index: 2, direction: "descending" });
+  if (!portfolios.length) return <p className="message message-info">No portfolio scorecards are available.</p>;
+  const sorted = [...portfolios].sort((a, b) => compareScorecard(a, b, sort.index, sort.direction));
+  const display = (portfolio: PortfolioScorecard): string[] => [portfolio.portfolio, portfolio.application_count.toLocaleString(), percent(portfolio.completeness_percent), portfolio.critical_application_count.toLocaleString(), count(portfolio.possible_duplicate_count), count(portfolio.obsolete_indicator_count), count(portfolio.explicit_integration_count), count(portfolio.unmapped_output_family_application_count), portfolio.risk_count.toLocaleString(), portfolio.highest_risk_severity || "—"];
+  return <div className="table-scroll portfolio-insights-table"><table className="simple-table"><thead><tr>{columns.map((column, index) => <th key={column} aria-sort={index < 2 ? undefined : sort.index === index ? sort.direction : "none"}>{index < 2 ? column : <button className="scorecard-sort-button" type="button" onClick={() => setSort((current) => ({ index, direction: current.index === index && current.direction === "ascending" ? "descending" : "ascending" }))}>{column}{sort.index === index ? sort.direction === "ascending" ? " ↑" : " ↓" : ""}</button>}</th>)}</tr></thead><tbody>{sorted.map((portfolio) => <tr key={portfolio.portfolio}>{display(portfolio).map((cell, index) => <td key={`${portfolio.portfolio}-${index}`}>{cell}</td>)}</tr>)}</tbody></table></div>;
+}
+
+function compareScorecard(a: PortfolioScorecard, b: PortfolioScorecard, index: number, direction: "ascending" | "descending"): number {
+  const left = scorecardSortValue(a, index);
+  const right = scorecardSortValue(b, index);
+  if (left === null || right === null) return left === right ? a.portfolio.localeCompare(b.portfolio) : left === null ? 1 : -1;
+  let result: number;
+  if (index === 9) {
+    const order: Record<string, number> = { critical: 4, high: 3, medium: 2, low: 1 };
+    result = (order[String(left).toLowerCase()] ?? 0) - (order[String(right).toLowerCase()] ?? 0);
+  } else result = typeof left === "number" && typeof right === "number" ? left - right : String(left).localeCompare(String(right));
+  return (direction === "ascending" ? result : -result) || a.portfolio.localeCompare(b.portfolio);
+}
+
+function scorecardSortValue(item: PortfolioScorecard, index: number): string | number | null {
+  return [item.portfolio, item.application_count, item.completeness_percent, item.critical_application_count, item.possible_duplicate_count, item.obsolete_indicator_count, item.explicit_integration_count, item.unmapped_output_family_application_count, item.risk_count, item.highest_risk_severity][index];
 }
 
 function DataTable({ headers, rows, empty }: { headers: string[]; rows: Array<{ id: string; cells: ReactNode[] }>; empty: string }) {
