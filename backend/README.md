@@ -326,18 +326,19 @@ clients should use the `/analysis/technology` endpoint family.
 
 ## Output Family analysis
 
-Phase E deterministically compares preprocessed current-CMDB descriptive
-metadata with the configured Output Family names, descriptions, keywords, and
-member terms, then stores the result at
+Phase E scores every populated current-CMDB field against the configured
+Output Family names, descriptions, keywords, patterns, and member terms. It
+uses the current-session mandatory-fields configuration as an internal field
+weight, with additional field relevance weights for functional descriptions,
+output-related fields, application names, and general context. These weights
+are analysis details and are not shown in the UI. Matching uses normalized
+phrases and meaningful-token overlap; it does not call OpenAI or need an API
+key. Each application is assigned to one best-supported configured family.
+When no family meets the evidence threshold, the application is assigned to a
+single `Others` cluster and a comment records the closest family considered
+and the CMDB evidence reviewed. The result is stored at
 `jobs/{job_id}/results/output_families.json`. Both current-session inputs are
-required. It performs no external or OpenAI calls and needs no API key.
-
-Description, Business Function, Capability, Supported Process, and Application
-Name use default weights of 35, 25, 20, 15, and 5, normalized over fields that
-are present; Portfolio and output-oriented descriptive columns provide limited
-supporting context. Matching uses normalized phrases, whole tokens, and token
-overlap rather than partial-word substrings. Output Cluster defaults to the
-assigned family unless an explicit cluster configuration exists.
+required; mandatory-field configuration is used when available.
 
 Run the analysis with no body, `{}`, or bounded options such as
 `{"family_limit": 50, "member_limit": 200, "include_unmapped": true,
@@ -600,8 +601,9 @@ remains unprefixed.
    store a result.
 5. Inspect summary and application mapping. Verify every CMDB application has a
    validated result with confidence, status, Fields Used, and rationale.
-6. Exercise multiple-family and insufficient-evidence cases. Confirm only
-   configured families (plus the `Others` fallback) are returned.
+6. Exercise competing-family and insufficient-evidence cases. Confirm each
+   application maps to one best-supported configured family or the single
+   `Others` fallback, with the reason and reviewed CMDB evidence in its comment.
 7. Download the three CSV endpoints and verify their documented headers and
    `text/csv` content type. Confirm all stored views return `404` before a run
    and after either required input is replaced.

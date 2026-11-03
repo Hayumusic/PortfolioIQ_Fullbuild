@@ -77,13 +77,24 @@ class OutputFamilyAnalysisTests(unittest.TestCase):
         self.assertNotIn(("Technology", "ignored"), detected)
         self.assertEqual(service._detected_output_values({"Profile": "not an output field"}), [])
 
-    def test_configured_direct_matching_is_case_insensitive_and_allows_multiple_families(self):
-        result = self.run_and_get(self.create_inputs())
+    def test_configured_direct_matching_selects_one_best_supported_family(self):
+        job_id = self.create_inputs()
+        result = self.run_and_get(job_id)
         details = {row["application_key"]: row for row in result["output_details"]}
-        self.assertEqual(details["A1"]["output_family_classification"], "Reporting; Data Exchange")
-        self.assertEqual(details["A3"]["output_family_classification"], "Reporting; Product Data")
+        self.assertEqual(details["A1"]["output_family_classification"], "Reporting")
+        self.assertEqual(details["A3"]["output_family_classification"], "Reporting")
         self.assertEqual(details["A1"]["confidence_level"], "High")
-        self.assertEqual(details["A1"]["why_classified"], "Matched configured output family/member keywords")
+        self.assertTrue(details["A1"]["why_classified"].startswith("Mapped to "))
+        mapping = self.services.output_family_analysis_service.get_application_mapping(
+            job_id, display_size="all"
+        )
+        self.assertTrue(all(row["output_family_count"] == 1 for row in mapping["applications"]))
+        self.assertTrue(all(len(row["output_families"]) <= 1 for row in mapping["applications"]))
+
+    def test_mandatory_fields_receive_internal_context_weight(self):
+        service = self.services.output_family_analysis_service
+        self.assertEqual(service._field_weight("Business Function", ["Business Function"]), 4.0)
+        self.assertEqual(service._field_weight("Business Function", []), 3.0)
 
     def test_family_name_match_and_partial_words_do_not_match(self):
         service = self.services.output_family_analysis_service
@@ -102,6 +113,7 @@ class OutputFamilyAnalysisTests(unittest.TestCase):
         }, taxonomy)
         self.assertEqual(matched["output_families"], ["API"])
         self.assertEqual(partial["assigned_output_family"], "Others")
+        self.assertEqual(partial["output_clusters"], ["Others"])
         self.assertTrue(partial["is_other"])
 
     def test_configured_application_members_match_normalized_identity(self):
@@ -124,16 +136,16 @@ class OutputFamilyAnalysisTests(unittest.TestCase):
         mapping = self.services.output_family_analysis_service.get_application_mapping(
             job_id, display_size="all"
         )["applications"][0]
-        self.assertIn("member application", [value.casefold() for value in mapping["matched_evidence"]])
+        self.assertTrue(any("member application" in value.casefold() for value in mapping["matched_evidence"]))
 
     def test_others_reasons_cover_indicator_and_no_relevant_match(self):
         job_id = self.create_inputs()
         result = self.run_and_get(job_id)
         exceptions = {row["application_name"]: row for row in result["exceptions"]}
-        self.assertEqual(exceptions["Seven"]["reason"], "Output indicator found but no configured output family matched")
-        self.assertEqual(exceptions["Eight"]["reason"], "No configured output family or output indicator matched")
+        self.assertIn("Closest candidate:", exceptions["Seven"]["reason"])
+        self.assertIn("Review evidence:", exceptions["Seven"]["comment"])
         self.assertEqual(exceptions["Seven"]["confidence_level"], "Low")
-        self.assertEqual(exceptions["Eight"]["evidence_type"], "Missing Evidence")
+        self.assertEqual(exceptions["Eight"]["confidence_level"], "Low")
 
         status, summary_result = self.request(
             "GET", f"/api/jobs/{job_id}/analysis/output-families/summary"
@@ -141,45 +153,44 @@ class OutputFamilyAnalysisTests(unittest.TestCase):
         self.assertEqual(status, 200)
         summary = summary_result["summary"]
         self.assertEqual(summary["total_application_count"], 8)
-        self.assertEqual(summary["classified_application_count"], 7)
-        self.assertEqual(summary["evidence_clustered_application_count"], 1)
-        self.assertEqual(summary["insufficient_evidence_application_count"], 1)
-        self.assertEqual(summary["unclassified_application_count"], 1)
+        self.assertEqual(summary["classified_application_count"], 6)
+        self.assertEqual(summary["evidence_clustered_application_count"], 0)
+        self.assertEqual(summary["insufficient_evidence_application_count"], 2)
+        self.assertEqual(summary["unclassified_application_count"], 2)
 
         mapping = self.services.output_family_analysis_service.get_application_mapping(
             job_id, display_size="all"
         )
         applications = {row["application_code"]: row for row in mapping["applications"]}
-        self.assertEqual(mapping["insufficient_evidence_application_count"], 1)
-        self.assertEqual(applications["A7"]["assigned_output_cluster"], "Others / Download")
-        self.assertEqual(applications["A7"]["classification_status"], "Classified")
+        self.assertEqual(mapping["insufficient_evidence_application_count"], 2)
+        self.assertEqual(applications["A7"]["assigned_output_cluster"], "Others")
+        self.assertEqual(applications["A7"]["classification_status"], "Insufficient Evidence")
         self.assertEqual(applications["A7"]["confidence"], "Low")
-        self.assertEqual(
-            applications["A8"]["assigned_output_cluster"],
-            "Others / insufficient output evidence",
-        )
+        self.assertEqual(applications["A8"]["assigned_output_cluster"], "Others")
         self.assertEqual(applications["A8"]["classification_status"], "Insufficient Evidence")
         self.assertEqual(applications["A8"]["confidence"], "Low")
+        self.assertIn("Closest candidate:", applications["A7"]["comment"])
 
-    def test_clusters_have_mvp_fields_and_behavior(self):
+    def test_clusters_have_mvp_fields_and_one_others_cluster(self):
         result = self.run_and_get(self.create_inputs())
         clusters = {row["output_family_name"]: row for row in result["output_family_clusters"]}
         self.assertEqual(clusters["Reporting"]["application_count"], 4)
-        self.assertEqual(clusters["Product Data"]["application_count"], 3)
+        self.assertEqual(clusters["Product Data"]["application_count"], 1)
+        self.assertEqual(clusters["Data Exchange"]["application_count"], 1)
         self.assertEqual(clusters["Others"]["application_count"], 2)
-        self.assertEqual(clusters["Reporting"]["similarity_notes"], "Applications classified into the same output family using configured family/member list.")
+        self.assertEqual(sum(name == "Others" for name in clusters), 1)
+        self.assertIn("weighted CMDB functional context", clusters["Reporting"]["similarity_notes"])
         self.assertIn("source_of_truth_labels_in_cluster", clusters["Reporting"])
 
     def test_yes_no_matrix_contains_all_configured_families_and_others(self):
         result = self.run_and_get(self.create_inputs()); matrix = result["family_matrix"]
         self.assertEqual(matrix["configured_families"], ["Reporting", "Product Data", "Data Exchange"])
-        self.assertEqual(matrix["other_clusters"], ["Others / Download", "Others / insufficient output evidence"])
+        self.assertEqual(matrix["other_clusters"], ["Others"])
         rows = {row["application_key"]: row["values"] for row in matrix["rows"]}
         self.assertEqual(rows["A1"]["Reporting"], "Yes")
-        self.assertEqual(rows["A1"]["Data Exchange"], "Yes")
-        self.assertEqual(rows["A1"]["Others / Download"], "No")
-        self.assertEqual(rows["A7"]["Others / Download"], "Yes")
-        self.assertEqual(rows["A8"]["Others / insufficient output evidence"], "Yes")
+        self.assertEqual(sum(value == "Yes" for value in rows["A1"].values()), 1)
+        self.assertEqual(rows["A7"]["Others"], "Yes")
+        self.assertEqual(rows["A8"]["Others"], "Yes")
 
     def test_matrix_normalizes_family_identity_and_one_row_per_application_code(self):
         job_id = self.services.job_service.create_job().job_id
@@ -193,27 +204,42 @@ class OutputFamilyAnalysisTests(unittest.TestCase):
         result = self.run_and_get(job_id)
         self.assertEqual(len(result["family_matrix"]["rows"]), 1)
         values = result["family_matrix"]["rows"][0]["values"]
-        self.assertEqual(values["Reporting"], "Yes")
-        self.assertEqual(values["Data Exchange"], "Yes")
+        self.assertEqual(sum(value == "Yes" for value in values.values()), 1)
         normalized = self.services.output_family_analysis_service._yes_no_matrix(
             [{"name": "Reporting"}],
             [{"application_key": "A2", "application_name": "Two", "output_families": [" reporting "]}],
         )
         self.assertEqual(normalized["rows"][0]["values"]["Reporting"], "Yes")
 
+    def test_mandatory_cmdb_fields_are_used_as_internal_weights(self):
+        job_id = self.services.job_service.create_job().job_id
+        self.services.cmdb_service.upload(job_id, "weighted.xlsx", workbook_bytes(
+            ["Application Code", "Application Name", "Business Function", "Description"],
+            [["A1", "One", "Customer payments", "Account servicing"]],
+        ))
+        self.services.upload_config_service.upload_mandatory_fields_config(
+            job_id, "mandatory.xlsx", workbook_bytes(["Mandatory Field"], [["Business Function"]])
+        )
+        applications = self.services.output_family_analysis_service._prepare_applications(
+            self.services.output_family_analysis_service._load_current_preview(job_id), ["Business Function"]
+        )
+        scoring_fields = {field["header"]: field for field in applications[0]["scoring_fields"]}
+        self.assertEqual(scoring_fields["Business Function"]["weight"], 4.0)
+        self.assertEqual(scoring_fields["Description"]["weight"], 3.0)
+
     def test_redundancy_low_medium_high_rules_and_copy(self):
         result = self.run_and_get(self.create_inputs())
         alerts = {row["shared_output_family"]: row for row in result["redundancy_alerts"]}
-        self.assertEqual(alerts["Data Exchange"]["redundancy_severity"], "Low")
-        self.assertEqual(alerts["Product Data"]["redundancy_severity"], "Medium")
         self.assertEqual(alerts["Reporting"]["redundancy_severity"], "High")
+        self.assertNotIn("Data Exchange", alerts)
+        self.assertNotIn("Product Data", alerts)
         self.assertEqual(alerts["Reporting"]["business_impact"], "Potential duplicated reporting, analytics, API, export, or data-processing capability.")
 
     def test_output_details_fields_and_exceptions_filter(self):
         result = self.run_and_get(self.create_inputs())
         expected = {"application_key", "application_name", "output_summary", "output_family_classification",
                     "key_evidence_or_keywords_found", "consumers_or_downstream_users", "confidence_level",
-                    "why_classified", "direct_or_inferred", "evidence_type", "missing_data_warnings",
+                    "why_classified", "comment", "direct_or_inferred", "evidence_type", "missing_data_warnings",
                     "source_of_truth_label", "reliability_label"}
         self.assertEqual(set(result["output_details"][0]), expected)
         self.assertEqual({row["application_name"] for row in result["exceptions"]}, {"Seven", "Eight"})
@@ -225,7 +251,7 @@ class OutputFamilyAnalysisTests(unittest.TestCase):
         job = self.create_inputs(); result = self.run_and_get(job)
         self.assertEqual(set(result["downloads"]), {"details", "clusters", "alerts"})
         stored = self.services.job_service.storage.load_json(f"jobs/{job}/results/output_families.json")
-        self.assertEqual(stored["classification_provider"], "deterministic_direct_term_matching")
+        self.assertEqual(stored["classification_provider"], "weighted_contextual_taxonomy_matching")
         self.assertIn("application_key", self.services.output_family_analysis_service.get_output_details_csv(job))
 
     def test_current_session_isolation_and_taxonomy_freshness(self):

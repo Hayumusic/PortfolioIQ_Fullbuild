@@ -23,7 +23,7 @@ class OutputFamilyAnalysisService:
     """MVP-compatible deterministic output-family classification."""
 
     result_file_name = "output_families.json"
-    analysis_version = 4
+    analysis_version = 5
     output_column_keywords = (
         "output", "report", "dashboard", "api", "export", "file", "feed",
         "extract", "dataset", "visualization", "visualisation", "analytics",
@@ -34,14 +34,6 @@ class OutputFamilyAnalysisService:
         "file", "feed", "extract", "dataset", "data processing", "analytics",
         "interface", "download", "publication",
     )
-    cluster_stop_words = frozenset({
-        "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
-        "in", "into", "is", "it", "of", "on", "or", "our", "that", "the",
-        "their", "this", "to", "via", "with", "application", "applications",
-        "business", "data", "description", "function", "output", "outputs",
-        "provide", "provides", "system", "used", "uses", "using", "not",
-        "available", "none", "unknown", "yes", "no",
-    })
     classification_statuses = ("Classified", "Multiple Families", "Insufficient Evidence")
     confidences = ("High", "Low")
 
@@ -53,12 +45,22 @@ class OutputFamilyAnalysisService:
         del include_unmapped, include_inactive
         preview, config = self._load_current_preview(job_id), self._load_config(job_id)
         taxonomy = self._taxonomy(config)
-        applications = self._prepare_applications(preview)
+        for family in taxonomy:
+            profile_values = [
+                family.get("name"),
+                family.get("description"),
+                *(term.get("normalized") for term in family.get("terms", [])),
+            ]
+            family["_profile_tokens"] = self._meaningful_tokens(
+                " ".join(str(value) for value in profile_values if value)
+            )
+        mandatory_config = self.upload_config_service.get_mandatory_fields_config(job_id)
+        mandatory_fields = mandatory_config.get("mandatory_fields", [])
+        applications = self._prepare_applications(preview, mandatory_fields)
         if not applications:
             raise OutputFamilyAnalysisPrerequisiteError("The current CMDB contains no applications to classify.")
         source_label, reliability_label = self._evidence_labels(job_id, str(preview["upload_id"]))
         matrix = [self._classify(app, taxonomy, source_label, reliability_label) for app in applications]
-        self._assign_other_clusters(matrix)
         families, members = self._aggregate_families(taxonomy, matrix)
         gaps = self._classification_gaps(matrix)
         clusters = self._output_family_clusters(taxonomy, matrix, source_label, reliability_label)
@@ -68,7 +70,7 @@ class OutputFamilyAnalysisService:
         exceptions = [{
             "application_name": item["application_name"],
             "output_description": item["output_summary"] or "Not Available",
-            "reason": item["evidence_reason"], "confidence_level": item["confidence"],
+            "reason": item["evidence_reason"], "comment": item["comment"], "confidence_level": item["confidence"],
             "evidence_type": item["evidence_type"],
             "missing_data_warnings": item["missing_data_warnings"],
         } for item in matrix if item["is_other"]]
@@ -99,7 +101,7 @@ class OutputFamilyAnalysisService:
             "families": families, "members": members, "total_member_count": len(members), "gaps": gaps,
             "application_matrix": matrix, "output_family_clusters": clusters, "family_matrix": family_matrix,
             "redundancy_alerts": alerts, "output_details": details, "exceptions": exceptions,
-            "classification_provider": "deterministic_direct_term_matching",
+            "classification_provider": "weighted_contextual_taxonomy_matching",
             "options": {"include_unmapped": True, "include_inactive": True},
         }
         self.storage.save_json(self._result_path(job_id), result)
@@ -146,8 +148,13 @@ class OutputFamilyAnalysisService:
                 seen.add(normalized); result.append({"display": str(value).strip(), "normalized": normalized})
         return result
 
-    def _prepare_applications(self, preview: dict[str, Any]) -> list[dict[str, Any]]:
+    def _prepare_applications(self, preview: dict[str, Any], mandatory_fields: list[str] | None = None) -> list[dict[str, Any]]:
         code_column, name_column = preview.get("application_code_column"), preview.get("application_name_column")
+        mandatory_headers = {
+            CMDBParserService.normalize_header(field)
+            for field in mandatory_fields or []
+            if isinstance(field, str) and field.strip()
+        }
         applications: list[dict[str, Any]] = []
         for index, raw in enumerate(preview.get("applications", [])):
             if not isinstance(raw, dict): continue
@@ -155,13 +162,31 @@ class OutputFamilyAnalysisService:
             code = self._text(source.get(code_column)) if code_column else None
             name = (self._text(source.get(name_column)) if name_column else None) or self._text(raw.get("application_name")) or code or f"CMDB row {index + 1}"
             detected = self._detected_output_values(source)
-            consumer_values = [value for header, value in detected if "consumer" in self._normalize(header) or "downstream" in self._normalize(header)]
+            context_fields = [
+                (str(header), text)
+                for header, raw_value in source.items()
+                if (text := self._text(raw_value))
+            ]
+            consumer_values = [value for header, value in context_fields if "consumer" in self._normalize(header) or "downstream" in self._normalize(header)]
+            application_mandatory_fields = [
+                header for header, _ in context_fields
+                if CMDBParserService.normalize_header(header) in mandatory_headers
+            ]
+            scoring_fields = [
+                {
+                    "header": header, "value": value, "normalized": self._normalize(value),
+                    "tokens": self._meaningful_tokens(value),
+                    "weight": self._field_weight(header, application_mandatory_fields),
+                }
+                for header, value in context_fields
+            ]
             applications.append({
                 "application_code": code, "application_key": code or f"record-{index + 1}", "application_name": name,
                 "portfolio": self._field(source, ("Portfolio", "Application Portfolio")),
                 "business_criticality": self._field(source, ("Business Criticality", "Criticality")),
                 "detected_values": detected, "combined_text": " | ".join(value for _, value in detected),
-                "consumers": " | ".join(consumer_values),
+                "consumers": " | ".join(consumer_values), "context_fields": context_fields,
+                "mandatory_fields": application_mandatory_fields, "scoring_fields": scoring_fields,
             })
         return applications
 
@@ -179,174 +204,203 @@ class OutputFamilyAnalysisService:
 
     def _classify(self, application: dict[str, Any], taxonomy: list[dict[str, Any]],
                   source_label: str = "Current CMDB",
-                  reliability_label: str = "Deterministic direct configured-term matching") -> dict[str, Any]:
-        combined = application.get("combined_text", "")
-        direct_text = self._normalize(combined)
+                  reliability_label: str = "Weighted CMDB context and configured output-family evidence") -> dict[str, Any]:
         application_code = self._normalize(application.get("application_code"))
         application_name = self._normalize(application.get("application_name"))
-        matches = []
-        for family in taxonomy:
-            family_evidence = [
-                term["display"] for term in family["terms"]
-                if self._contains_normalized_term(direct_text, term["normalized"])
-            ]
-            family_evidence.extend(
-                member["display"] for member in family.get("identity_members", [])
-                if (
-                    member["application_code"]
-                    and member["application_code"] == application_code
-                ) or (
-                    member["application_name"]
-                    and member["application_name"] == application_name
-                )
-            )
-            matches.append((family["name"], family_evidence))
-        matches = [(family, terms) for family, terms in matches if terms]
-        configured_families = [family for family, _ in matches]
-        evidence_by_family = {
-            self._normalize(family): self._ordered_unique(terms)
-            for family, terms in matches
-        }
-        evidence = self._ordered_unique(term for _, terms in matches for term in terms)
-        indicator = any(
-            self._contains_normalized_term(direct_text, self._normalize(term))
-            for term in self.output_indicators
-        )
-        if configured_families:
-            output_families = configured_families
-            assigned, confidence = "; ".join(configured_families), "High"
-            evidence_reason = why = "Matched configured output family/member keywords"
-            status = "Multiple Families" if len(configured_families) > 1 else "Classified"
+        if "context_fields" not in application:
+            application["context_fields"] = application.get("detected_values", [])
+        ranked = []
+        for position, family in enumerate(taxonomy):
+            ranked.append((self._score_family(application, family), position, family))
+        ranked.sort(key=lambda item: (-item[0]["score"], item[1]))
+        best = ranked[0][0] if ranked else {"score": 0.0, "evidence": [], "fields": [], "matched_terms": [], "identity_match": False, "context_terms": []}
+        selected = ranked[0][2] if ranked and best["score"] >= 4.0 else None
+        configured_families = [selected["name"]] if selected else []
+        evidence = best["evidence"]
+        used_fields = best["fields"]
+        if selected:
+            confidence = "High" if best["identity_match"] or best["score"] >= 8.5 else "Medium"
+            assigned = selected["name"]
+            status = "Classified"
+            rationale = self._family_rationale(selected["name"], best)
+            comment = ""
+            output_families = [assigned]
+            output_clusters = [assigned]
+            assignments = [{"output_family": assigned, "output_cluster": assigned, "evidence": evidence}]
+            evidence_reason = rationale
         else:
-            # Preserve the established empty configured-family collection for
-            # downstream coverage metrics; assigned_output_family is the
-            # canonical classifier result and the matrix maps it to Others.
+            assigned = "Others"
             output_families = []
-            assigned, confidence, status = "Others", "Low", "Insufficient Evidence"
-            evidence_reason = "Output indicator found but no configured output family matched" if indicator else "No configured output family or output indicator matched"
-            why = "Assigned to Others because no configured family clearly matched"
-        exists = bool(combined)
-        direct = "Directly found + rules-based classification" if exists else "Missing Evidence"
-        evidence_type = "Direct CMDB Evidence + Inferred Analysis" if exists else "Missing Evidence"
-        missing = "" if exists else "No output-related CMDB data found"
-        fields = [header for header, _ in application.get("detected_values", [])]
+            output_clusters = ["Others"]
+            confidence = "Insufficient Evidence" if not application.get("context_fields") else "Low"
+            status = "Insufficient Evidence"
+            closest = ranked[0][2]["name"] if ranked else None
+            fallback_context = sorted(
+                application.get("scoring_fields", []),
+                key=lambda item: (-item["weight"], item["header"].casefold()),
+            )[:3]
+            review_evidence = [
+                f"{item['header']}: {self._evidence_excerpt(item['value'], 120)}"
+                for item in fallback_context
+            ]
+            if closest and best["fields"]:
+                comment = (
+                    f"No configured output family met the evidence threshold. Closest candidate: {closest}. "
+                    f"Review evidence: {'; '.join(best['evidence'][:3])}."
+                )
+            elif application.get("context_fields"):
+                comment = (
+                    "CMDB fields were reviewed, but no configured family had enough functional evidence. "
+                    f"Closest candidate: {closest or 'none'}. Review evidence: {'; '.join(review_evidence)}."
+                )
+                used_fields = self._ordered_unique(item["header"] for item in fallback_context)
+            else:
+                comment = "No populated CMDB fields were available to infer this application's outputs."
+            rationale = comment
+            evidence_reason = comment
+            assignments = [{"output_family": "Others", "output_cluster": "Others", "evidence": evidence}]
+        detected = application.get("detected_values", [])
+        detected_summary = " | ".join(value for _, value in detected)
+        inferred_summary = " | ".join(evidence)
+        output_summary = detected_summary or inferred_summary
+        output_specific_present = bool(detected_summary)
+        direct = "Direct output-related CMDB fields" if output_specific_present else ("Inferred from CMDB functional context" if selected else "CMDB functional context reviewed; no family assignment supported")
+        evidence_type = "Direct CMDB Evidence + Contextual Analysis" if application.get("context_fields") else "Missing Evidence"
+        missing = "" if application.get("context_fields") else "No populated CMDB evidence was available for output classification"
         details = {
             "application_key": application["application_key"], "application_name": application["application_name"],
-            "output_summary": combined, "output_family_classification": assigned,
-            "key_evidence_or_keywords_found": " | ".join(evidence) if evidence else evidence_reason,
+            "output_summary": output_summary, "output_family_classification": assigned,
+            "key_evidence_or_keywords_found": " | ".join(evidence) if evidence else "No matching CMDB evidence",
             "consumers_or_downstream_users": application.get("consumers", ""), "confidence_level": confidence,
-            "why_classified": why, "direct_or_inferred": direct, "evidence_type": evidence_type,
+            "why_classified": rationale, "comment": comment if not selected else "",
+            "direct_or_inferred": direct, "evidence_type": evidence_type,
             "missing_data_warnings": missing, "source_of_truth_label": source_label, "reliability_label": reliability_label,
         }
         return {
             "application_code": application.get("application_code"), "application_key": application["application_key"],
             "application_name": application["application_name"], "portfolio": application.get("portfolio"),
             "business_criticality": application.get("business_criticality"),
-            "assignments": [
-                {
-                    "output_family": family,
-                    "output_cluster": family,
-                    "evidence": evidence_by_family.get(self._normalize(family), []),
-                }
-                for family in output_families
-            ],
-            "output_families": output_families, "configured_families": configured_families,
-            "is_other": not configured_families,
-            "output_clusters": output_families, "output_family_count": len(output_families),
+            "assignments": assignments, "output_families": output_families,
+            "configured_families": configured_families, "is_other": not selected,
+            "output_clusters": output_clusters, "output_family_count": 1,
             "assigned_output_family": assigned, "assigned_output_cluster": assigned, "confidence": confidence,
-            "classification_status": status, "fields_used": fields, "matched_evidence": evidence,
-            "classification_rationale": why, "warnings": [missing] if missing else [], "output_summary": combined,
+            "classification_status": status, "fields_used": used_fields, "matched_evidence": evidence,
+            "classification_rationale": rationale, "comment": comment,
+            "warnings": [missing] if missing else [], "output_summary": output_summary,
             "evidence_reason": evidence_reason, "consumers": application.get("consumers", ""),
             "direct_or_inferred": direct, "evidence_type": evidence_type, "missing_data_warnings": missing,
-            "detected_values": application.get("detected_values", []),
-            "output_details": details,
+            "detected_values": detected, "output_details": details,
         }
 
-    def _assign_other_clusters(self, matrix: list[dict[str, Any]]) -> None:
-        """Assign unmatched applications to evidence-derived, deterministic subclusters."""
-        unmatched = [item for item in matrix if item["is_other"]]
-        candidates_by_key: dict[str, dict[str, Any]] = {}
-        application_candidates: dict[str, list[str]] = {}
-        for item in unmatched:
-            candidates: list[str] = []
-            for _, value in item.get("detected_values", []):
-                tokens = [
-                    token for token in self._normalize(value).split()
-                    if token not in self.cluster_stop_words
-                    and (len(token) >= 3 or token in {"ai", "api", "bi"})
-                    and not token.isdigit()
-                ]
-                for token in tokens:
-                    candidate = candidates_by_key.setdefault(
-                        token, {"display_values": {}, "application_keys": set()}
-                    )
-                    display = self._evidence_display_token(value, token)
-                    candidate["display_values"][display] = candidate["display_values"].get(display, 0) + 1
-                    candidate["application_keys"].add(item["application_key"])
-                    if token not in candidates:
-                        candidates.append(token)
-            application_candidates[item["application_key"]] = candidates
+    def _score_family(self, application: dict[str, Any], family: dict[str, Any]) -> dict[str, Any]:
+        app_code = self._normalize(application.get("application_code"))
+        app_name = self._normalize(application.get("application_name"))
+        identity_match = any(
+            (member.get("application_code") and member["application_code"] == app_code)
+            or (member.get("application_name") and member["application_name"] == app_name)
+            for member in family.get("identity_members", [])
+        )
+        evidence: list[str] = []
+        fields: list[str] = []
+        matched_terms: list[str] = []
+        context_terms: list[str] = []
+        score = 0.0
+        if identity_match:
+            evidence.append(f"Configured application member: {application.get('application_name')} ({application.get('application_code') or 'code unavailable'})")
+            fields.extend(["Application Name", "Application Code"])
+            score += 20.0
 
-        for item in unmatched:
-            candidates = application_candidates.get(item["application_key"], [])
-            supported_candidates = [
-                token
-                for token in candidates
-                if len(candidates_by_key[token]["application_keys"]) >= 2
-                or token in {self._normalize(value) for value in self.output_indicators}
-            ]
-            if supported_candidates:
-                selected = sorted(
-                    supported_candidates,
-                    key=lambda token: (
-                        -len(candidates_by_key[token]["application_keys"]),
-                        -sum(candidates_by_key[token]["display_values"].values()),
-                        token,
-                    ),
-                )[0]
-                display_values = candidates_by_key[selected]["display_values"]
-                evidence = sorted(
-                    display_values,
-                    key=lambda value: (-display_values[value], value.casefold(), value),
-                )[0]
-                cluster = f"Others / {self._concise_cluster_label(evidence)}"
-                rationale = (
-                    f"No configured family matched; grouped under Others using the CMDB evidence term '{evidence}'."
-                )
-                item["matched_evidence"] = self._ordered_unique(
-                    [*item["matched_evidence"], evidence]
-                )
-                item["classification_status"] = "Classified"
-            else:
-                cluster = "Others / insufficient output evidence"
-                rationale = (
-                    "No configured family matched and the available output fields did not contain enough meaningful evidence to derive a subcluster."
-                )
-            item["assignments"] = [{
-                "output_family": "Others",
-                "output_cluster": cluster,
-                "evidence": list(item["matched_evidence"]),
-            }]
-            item["output_clusters"] = [cluster]
-            item["assigned_output_cluster"] = cluster
-            item["classification_rationale"] = rationale
-            item["output_details"]["output_family_classification"] = cluster
-            item["output_details"]["why_classified"] = rationale
-            if item["matched_evidence"]:
-                item["output_details"]["key_evidence_or_keywords_found"] = " | ".join(item["matched_evidence"])
+        profile_terms = [term for term in family.get("terms", []) if term.get("normalized")]
+        description = self._normalize(family.get("description"))
+        profile_tokens = family.get("_profile_tokens")
+        if profile_tokens is None:
+            profile_tokens = set()
+            for term in profile_terms:
+                profile_tokens.update(self._meaningful_tokens(term["normalized"]))
+            profile_tokens.update(self._meaningful_tokens(description))
+            if not profile_tokens:
+                profile_tokens = self._meaningful_tokens(family.get("name", ""))
+
+        scoring_fields = application.get("scoring_fields") or [
+            {"header": header, "value": value, "normalized": self._normalize(value),
+             "tokens": self._meaningful_tokens(value), "weight": self._field_weight(header, application.get("mandatory_fields", []))}
+            for header, value in application.get("context_fields", [])
+        ]
+        for scoring_field in scoring_fields:
+            header, value = scoring_field["header"], scoring_field["value"]
+            normalized_value = scoring_field["normalized"]
+            if not normalized_value:
+                continue
+            weight = scoring_field["weight"]
+            field_tokens = scoring_field["tokens"]
+            if not field_tokens:
+                continue
+            field_hits = []
+            for term in profile_terms:
+                normalized_term = term["normalized"]
+                if self._contains_normalized_term(normalized_value, normalized_term):
+                    field_hits.append(term["display"])
+            if description and self._contains_normalized_term(normalized_value, description):
+                field_hits.append(family.get("description"))
+            field_hits = self._ordered_unique([str(hit) for hit in field_hits if hit])
+            overlap = sorted(field_tokens & profile_tokens)
+            overlap_ratio = len(overlap) / max(1.0, (len(field_tokens) * len(profile_tokens)) ** 0.5)
+            contribution = weight * (3.25 * len(field_hits) + 3.5 * overlap_ratio)
+            if contribution <= 0:
+                continue
+            score += contribution
+            evidence.append(f"{header}: {self._evidence_excerpt(value)}")
+            fields.append(header)
+            matched_terms.extend(field_hits)
+            context_terms.extend(overlap)
+
+        return {
+            "score": score, "evidence": self._ordered_unique(evidence),
+            "fields": self._ordered_unique(fields), "matched_terms": self._ordered_unique(matched_terms),
+            "context_terms": self._ordered_unique(context_terms), "identity_match": identity_match,
+        }
 
     @classmethod
-    def _evidence_display_token(cls, value: str, normalized_token: str) -> str:
-        for token in re.findall(r"[\w+#.]+", unicodedata.normalize("NFKC", value), flags=re.UNICODE):
-            if cls._normalize(token) == normalized_token:
-                return token
-        return normalized_token
+    def _field_weight(cls, header: str, mandatory_fields: list[str]) -> float:
+        normalized = CMDBParserService.normalize_header(header)
+        mandatory = {CMDBParserService.normalize_header(value) for value in mandatory_fields}
+        if normalized in mandatory:
+            return 4.0
+        words = set(cls._normalize(header).split())
+        if words & {"description", "function", "functionality", "capability", "process", "purpose", "usecase", "case", "service", "product", "objective"}:
+            return 3.0
+        if words & {"output", "report", "dashboard", "api", "export", "feed", "extract", "dataset", "consumer", "downstream", "analytics"}:
+            return 2.5
+        if words & {"name", "application", "app"}:
+            return 1.4
+        if words & {"portfolio", "owner", "criticality", "status", "region", "country", "vendor", "technology", "stack", "hosting", "version", "cost", "users"}:
+            return 0.75
+        return 1.0
+
+    @classmethod
+    def _meaningful_tokens(cls, value: str) -> set[str]:
+        stop_words = {
+            "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "into", "is", "it", "of", "on", "or", "our", "that", "the", "their", "this", "to", "via", "with", "application", "applications", "description", "output", "outputs", "provide", "provides", "system", "used", "uses", "using", "not", "available", "none", "unknown", "yes", "no", "and/or", "app", "software", "solution", "tool"
+        }
+        return {token for token in cls._normalize(value).split() if token not in stop_words and (len(token) >= 2 or token in {"ai", "api", "bi"}) and not token.isdigit()}
 
     @staticmethod
-    def _concise_cluster_label(value: str) -> str:
-        if value.isupper() and len(value) <= 5:
-            return value
-        return value[:1].upper() + value[1:]
+    def _evidence_excerpt(value: str, limit: int = 240) -> str:
+        text = " ".join(str(value).split())
+        return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+    @staticmethod
+    def _family_rationale(family_name: str, score: dict[str, Any]) -> str:
+        fields = ", ".join(score["fields"][:4]) or "CMDB evidence"
+        terms = ", ".join(score["matched_terms"][:5])
+        concepts = ", ".join(score["context_terms"][:6])
+        if terms and concepts:
+            return f"Mapped to {family_name}: {fields} contain configured terms ({terms}) and related functional concepts ({concepts})."
+        if terms:
+            return f"Mapped to {family_name}: {fields} contain configured family/member terms ({terms})."
+        if concepts:
+            return f"Mapped to {family_name}: {fields} align with its configured description through shared functional concepts ({concepts})."
+        return f"Mapped to {family_name} using the configured application membership."
 
     def _aggregate_families(self, taxonomy: list[dict[str, Any]], matrix: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         families, members = [], []
@@ -372,8 +426,12 @@ class OutputFamilyAnalysisService:
                 result.append({"output_family_name": family_name,
                     "applications_producing_this_output_family": " | ".join(item["application_name"] for item in matched),
                     "application_count": len(matched), "specific_outputs_identified": " | ".join(item["output_summary"] for item in matched if item["output_summary"]),
-                    "similarity_notes": "Applications classified into the same output family using configured family/member list.",
-                    "confidence_level": "Low" if family_name == "Others" else "High",
+                    "similarity_notes": (
+                        "No configured family met the evidence threshold; per-application comments record the closest candidate and CMDB evidence."
+                        if family_name == "Others"
+                        else "Applications assigned to this configured output family using weighted CMDB functional context and configured-family evidence."
+                    ),
+                    "confidence_level": "Low" if family_name == "Others" else ("High" if all(item["confidence"] == "High" for item in matched) else "Medium"),
                     "evidence_type": "Direct CMDB Evidence + Inferred Analysis" if any(item["output_summary"] for item in matched) else "Missing Evidence",
                     "source_of_truth_labels_in_cluster": source_label, "reliability_labels_in_cluster": reliability_label})
         return result
@@ -381,22 +439,15 @@ class OutputFamilyAnalysisService:
     @classmethod
     def _yes_no_matrix(cls, taxonomy, matrix):
         configured_families = [item["name"] for item in taxonomy]
-        other_clusters = sorted(
-            {
-                cluster
-                for item in matrix if item.get("is_other", False)
-                for cluster in item.get("output_clusters", [])
-            },
-            key=lambda value: (
-                value == "Others / insufficient output evidence", value.casefold()
-            ),
-        )
-        if not other_clusters:
-            other_clusters = ["Others / insufficient output evidence"]
+        other_clusters = ["Others"]
         families = configured_families + other_clusters
         rows_by_identity: dict[str, dict[str, Any]] = {}
         for item in matrix:
             identity = cls._normalize(item["application_key"])
+            # CMDB exports can contain repeated rows for one application code. The
+            # matrix represents one best-fit family per application identity.
+            if identity in rows_by_identity:
+                continue
             row = rows_by_identity.setdefault(
                 identity,
                 {
@@ -508,7 +559,7 @@ class OutputFamilyAnalysisService:
 
     @staticmethod
     def _public_application(item):
-        keys = ("application_code", "application_name", "portfolio", "business_criticality", "assignments", "output_families", "output_clusters", "output_family_count", "assigned_output_family", "assigned_output_cluster", "confidence", "classification_status", "fields_used", "matched_evidence", "classification_rationale", "warnings")
+        keys = ("application_code", "application_name", "portfolio", "business_criticality", "assignments", "output_families", "output_clusters", "output_family_count", "assigned_output_family", "assigned_output_cluster", "confidence", "classification_status", "fields_used", "matched_evidence", "classification_rationale", "comment", "warnings")
         return {key: item[key] for key in keys}
 
     def _filter_applications(self, applications, *, portfolio="", output_family="", confidence="", classification_status="", search=""):
@@ -524,9 +575,7 @@ class OutputFamilyAnalysisService:
 
     @classmethod
     def _is_insufficient_output_evidence(cls, item: dict[str, Any]) -> bool:
-        return cls._same_family(
-            "Others / insufficient output evidence", item.get("output_clusters", [])
-        )
+        return bool(item.get("is_other")) and item.get("classification_status") == "Insufficient Evidence"
 
     @classmethod
     def _is_evidence_clustered(cls, item: dict[str, Any]) -> bool:
@@ -539,7 +588,7 @@ class OutputFamilyAnalysisService:
     def get_families_csv(self, job_id): return csv_text(self._load_current_result(job_id)["families"], ["family_key", "family_name", "family_description", "member_count", "portfolio_count", "multiple_family_count", "warnings"], list_columns={"warnings"})
     def get_members_csv(self, job_id): return csv_text(self._load_current_result(job_id)["members"], ["family_key", "family_name", "output_cluster", "application_code", "application_name", "portfolio", "confidence", "classification_status", "fields_used", "matched_evidence", "classification_rationale", "warnings"], list_columns={"fields_used", "matched_evidence", "warnings"})
     def get_gaps_csv(self, job_id): return csv_text(self._load_current_result(job_id)["gaps"], ["gap_type", "severity", "family_key", "family_name", "application_code", "application_name", "description", "recommended_action"])
-    def get_output_details_csv(self, job_id): return csv_text(self._load_current_result(job_id)["output_details"], ["application_key", "application_name", "output_summary", "output_family_classification", "key_evidence_or_keywords_found", "consumers_or_downstream_users", "confidence_level", "why_classified", "direct_or_inferred", "evidence_type", "missing_data_warnings", "source_of_truth_label", "reliability_label"])
+    def get_output_details_csv(self, job_id): return csv_text(self._load_current_result(job_id)["output_details"], ["application_key", "application_name", "output_summary", "output_family_classification", "key_evidence_or_keywords_found", "consumers_or_downstream_users", "confidence_level", "why_classified", "comment", "direct_or_inferred", "evidence_type", "missing_data_warnings", "source_of_truth_label", "reliability_label"])
     def get_output_clusters_csv(self, job_id): return csv_text(self._load_current_result(job_id)["output_family_clusters"], ["output_family_name", "applications_producing_this_output_family", "application_count", "specific_outputs_identified", "similarity_notes", "confidence_level", "evidence_type", "source_of_truth_labels_in_cluster", "reliability_labels_in_cluster"])
     def get_output_alerts_csv(self, job_id): return csv_text(self._load_current_result(job_id)["redundancy_alerts"], ["applications_involved", "shared_output_family", "similar_or_duplicated_outputs", "business_impact", "redundancy_severity", "recommendation", "evidence_type", "source_of_truth_label", "reliability_label"])
 
@@ -565,7 +614,7 @@ class OutputFamilyAnalysisService:
         return result
     def _evidence_labels(self, job_id, upload_id):
         path = f"jobs/{job_id}/processed/upload_metadata/{UploadKind.CMDB.value}/{upload_id}.json"; metadata = self.storage.load_json(path) if self.storage.exists(path) else {}
-        return f"Current CMDB: {metadata.get('filename') or 'uploaded workbook'}", "Deterministic configured-taxonomy matching from current-session CMDB metadata"
+        return f"Current CMDB: {metadata.get('filename') or 'uploaded workbook'}", "Weighted contextual configured-taxonomy matching from all current-session CMDB fields"
     @classmethod
     def _field(cls, source, aliases):
         normalized = {CMDBParserService.normalize_header(str(k)): v for k, v in source.items()}

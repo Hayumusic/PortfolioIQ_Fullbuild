@@ -94,6 +94,7 @@ class OutputFamilyApplication(ApiSchema):
     fields_used: list[str] = Field(default_factory=list)
     matched_evidence: list[str] = Field(default_factory=list)
     classification_rationale: str
+    comment: str = ""
     warnings: list[str] = Field(default_factory=list)
 
 

@@ -132,6 +132,7 @@ export interface ApplicationOutputMappingRow {
   fields_used: string[];
   matched_evidence: string[];
   classification_rationale: string;
+  comment: string;
   warnings: string[];
 }
 
@@ -184,6 +185,7 @@ export interface OutputDetail {
   consumers_or_downstream_users: string;
   confidence_level: string;
   why_classified: string;
+  comment: string;
   direct_or_inferred: string;
   evidence_type: string;
   missing_data_warnings: string;
@@ -195,6 +197,7 @@ export interface OutputException {
   application_name: string;
   output_description: string;
   reason: string;
+  comment?: string;
   confidence_level: string;
   evidence_type: string;
   missing_data_warnings: string;

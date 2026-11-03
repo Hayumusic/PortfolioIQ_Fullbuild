@@ -95,7 +95,7 @@ export default function OutputFamiliesPage() {
 
 function familyColors(family: string, hue: number, matched: boolean) {
   void hue;
-  if (family.trim().toLowerCase().startsWith("others /")) {
+  if (family.trim().toLowerCase() === "others" || family.trim().toLowerCase().startsWith("others /")) {
     return matched
       ? { backgroundColor: "#1d4ed8", color: "#fff" }
       : { backgroundColor: "#eff6ff", color: "#334155" };
@@ -103,6 +103,12 @@ function familyColors(family: string, hue: number, matched: boolean) {
   return matched
     ? { backgroundColor: "#2563eb", color: "#fff" }
     : { backgroundColor: "#dbeafe", color: "#334155" };
+}
+
+function matrixCellColors(matched: boolean) {
+  return matched
+    ? { backgroundColor: "#0c326f", color: "#fff" }
+    : { backgroundColor: "#fff", color: "#64748b" };
 }
 
 type MatrixRenderRow = OutputFamilyMatrixRow & { renderKey: string };
@@ -310,8 +316,8 @@ function Matrix({ results, applications, taxonomy }: { results: OutputMvpResults
       .sort((left, right) => applicationLabel(left).localeCompare(applicationLabel(right)));
   }, [allRows, outputFamily, portfolio, selectedMember]);
   const rows = useMemo(() => allRows.filter((row) => rowMatches(row)), [allRows, application, outputFamily, portfolio, selectedMember]);
-  const configuredFamilies = results.family_matrix.configured_families ?? families.filter((family) => !family.startsWith("Others /"));
-  const otherClusters = results.family_matrix.other_clusters ?? families.filter((family) => family.startsWith("Others /"));
+  const configuredFamilies = results.family_matrix.configured_families ?? families.filter((family) => family !== "Others" && !family.startsWith("Others /"));
+  const otherClusters = results.family_matrix.other_clusters ?? families.filter((family) => family === "Others" || family.startsWith("Others /"));
   const familyHues = useMemo(() => new Map(configuredFamilies.map((family, index) => [family, (index * 137.508) % 360])), [configuredFamilies]);
   return <div className="output-matrix-stack">
     <div className="output-family-filter-grid matrix-filters" aria-label="Output matrix filters">
@@ -320,20 +326,20 @@ function Matrix({ results, applications, taxonomy }: { results: OutputMvpResults
       <label>Portfolio<select value={portfolio} onChange={(event) => setPortfolio(event.target.value)}><option value="">All</option>{portfolios.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>
       <SearchableOutputApplication rows={applicationOptions} value={application} onChange={setApplication} />
     </div>
-    <section className="output-cluster-map" aria-label="Output family and evidence cluster map"><h4>Output family cluster map</h4><div className="output-cluster-list">{families.filter((family) => rows.some((row) => row.values[family] === "Yes")).map((family) => { const members = rows.filter((row) => row.values[family] === "Yes"); const evidenceCluster = family.startsWith("Others /"); return <details className="output-cluster-card" key={family}><summary>{family} · {members.length} applications</summary><p>{evidenceCluster ? "Evidence-derived keyword cluster from CMDB output fields." : "Configured output-family keyword match."}</p><ul>{members.map((row) => <li key={row.renderKey}>{applicationLabel(row)}</li>)}</ul></details>; })}</div></section>
+    <section className="output-cluster-map" aria-label="Output family and evidence cluster map"><h4>Output family cluster map</h4><div className="output-cluster-list">{families.filter((family) => rows.some((row) => row.values[family] === "Yes")).map((family) => { const members = rows.filter((row) => row.values[family] === "Yes"); const evidenceCluster = family === "Others" || family.startsWith("Others /"); return <details className="output-cluster-card" key={family}><summary>{family} · {members.length} applications</summary><p>{evidenceCluster ? "Applications without a sufficiently supported configured-family match. Per-application notes record the closest candidate and evidence." : "Applications assigned to this configured output family from CMDB functional context and family evidence."}</p><ul>{members.map((row) => <li key={row.renderKey}>{applicationLabel(row)}</li>)}</ul></details>; })}</div></section>
     <Table headers={["Application", "Confidence", "Matching Evidence", ...families]} rows={rows.map((row) => ({ key: row.renderKey, cells: [applicationLabel(row), row.confidence, row.matchedEvidence.join(", ") || "Insufficient evidence", ...families.map((family) => row.values[family])] }))} empty="No applications match the selected filters." />
     {rows.length > 0 && <div className="output-heatmap" style={{ minHeight: Math.max(400, rows.length * 42 + 90) }} aria-label="App vs Output Family heatmap" data-aspect="auto" data-zmin="0" data-zmax="1">
       <div className="heatmap-grid" style={{ gridTemplateColumns: `minmax(180px, 1.4fr) repeat(${families.length}, minmax(90px, 1fr))` }}>
         <div className="heatmap-group-corner" />
         {configuredFamilies.length > 0 && <div className="heatmap-column-group" style={{ gridColumn: `span ${configuredFamilies.length}` }}>Configured Output Families</div>}
-        {otherClusters.length > 0 && <div className="heatmap-column-group heatmap-column-group-others" style={{ gridColumn: `span ${otherClusters.length}` }}>Others — evidence-derived clusters</div>}
+        {otherClusters.length > 0 && <div className="heatmap-column-group heatmap-column-group-others" style={{ gridColumn: `span ${otherClusters.length}` }}>Others — no configured match</div>}
         <div className="heatmap-axis-corner">Applications</div>
         {families.map((family) => <div className="heatmap-x-label" key={family} style={familyColors(family, familyHues.get(family) ?? 0, false)}>{family}</div>)}
         {rows.map((row) => <div className="heatmap-row" key={row.renderKey} style={{ display: "contents" }}>
           <div className="heatmap-y-label" title={`${row.rationale} Confidence: ${row.confidence}.${row.fieldsUsed.length ? ` Fields: ${row.fieldsUsed.join(", ")}.` : ""}${row.matchedEvidence.length ? ` Evidence: ${row.matchedEvidence.join(", ")}.` : ""}`}>{applicationLabel(row)}</div>
           {families.map((family) => {
             const matched = row.values[family] === "Yes";
-            return <div key={family} className="heatmap-cell" style={familyColors(family, familyHues.get(family) ?? 0, matched)} title={`${applicationLabel(row)} / ${family}: ${row.values[family]}${matched && row.matchedEvidence.length ? `. Evidence: ${row.matchedEvidence.join(", ")}` : ""}`}>{row.values[family]}</div>;
+            return <div key={family} className="heatmap-cell" style={matrixCellColors(matched)} title={`${applicationLabel(row)} / ${family}: ${row.values[family]}${matched && row.matchedEvidence.length ? `. Evidence: ${row.matchedEvidence.join(", ")}` : ""}`}>{row.values[family]}</div>;
           })}
         </div>)}
       </div>
