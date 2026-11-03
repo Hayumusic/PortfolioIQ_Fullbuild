@@ -90,9 +90,9 @@ export default function PortfolioInsightsPage() {
         <ScorecardTable portfolios={result.top_portfolio_scorecards} />
       </CollapsiblePanel>
 
-      <CollapsiblePanel title="Risk register" description="Showing the highest-priority non-technology risks returned for this analysis.">
+      <CollapsiblePanel title="Risk register" description="Showing the highest-priority risks from non-lifecycle causes. Technology lifecycle concerns are listed in Technology & Integration.">
         <div className="section-heading"><span /><a className="button button-secondary" href={csvDownloadUrl(result.detail_endpoints.risks_csv_endpoint)}>Download CSV</a></div>
-        <DataTable headers={["Severity", "Application", "Portfolio", "Risk", "Evidence", "Recommended action", "Source", "Confidence"]} rows={result.risk_sample.map((risk) => ({ id: risk.risk_id, cells: [<StatusBadge key="severity" tone={severityTone(risk.severity)}>{risk.severity}</StatusBadge>, applicationLabel(risk.application_name, risk.application_code), risk.portfolio || "Unassigned", humanize(risk.risk_type), risk.evidence, risk.recommended_action, moduleLabel(risk.evidence_module), risk.confidence] }))} empty="No non-technology risks were identified from available module results." />
+        <DataTable headers={["Severity", "Application", "Portfolio", "Risk", "Evidence", "Recommended action", "Source", "Confidence"]} rows={result.risk_sample.map((risk) => ({ id: risk.risk_id, cells: [<StatusBadge key="severity" tone={severityTone(risk.severity)}>{risk.severity}</StatusBadge>, applicationLabel(risk.application_name, risk.application_code), risk.portfolio || "Unassigned", humanize(risk.risk_type), risk.evidence, risk.recommended_action, moduleLabel(risk.evidence_module), risk.confidence] }))} empty="No risks were identified from non-lifecycle causes." />
       </CollapsiblePanel>
 
       <CollapsiblePanel title="Recommended actions" description="Actions are linked to their source risks and available evidence.">
